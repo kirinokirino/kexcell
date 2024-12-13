@@ -13,11 +13,13 @@ fn main() -> io::Result<()> {
         .map(|file| format!("{folder}/{file}.{extension}"))
         .collect();
 
-    for contents in paths
+    let separators = vec![',', ',', ',', ',', '\t'];
+    for (contents, separator) in paths
         .into_iter()
         .filter_map(|path| read_to_string(path).ok())
+        .zip(separators.into_iter())
     {
-        let (csv, size) = parse_csv(&contents);
+        let (csv, size) = parse_csv(&contents, separator);
         display_table(csv, size);
 
         println!("{}", "-".repeat(20));
@@ -91,12 +93,12 @@ fn display_table(table: HashMap<Pos, Status<Cell>>, size: Pos) {
     }
 }
 
-fn parse_csv(contents: &str) -> (HashMap<Pos, Status<Cell>>, Pos) {
+fn parse_csv(contents: &str, separator: char) -> (HashMap<Pos, Status<Cell>>, Pos) {
     let lines = contents.lines().enumerate();
     let mut cells = HashMap::new();
     let (mut max_x, mut max_y) = (0, 0);
     for (y, line) in lines {
-        for (x, cell) in line.split(',').enumerate() {
+        for (x, cell) in line.split(separator).enumerate() {
             cells.insert(Pos::new(x, y), parse_cell(cell));
             if x > max_x {
                 max_x = x
@@ -192,7 +194,7 @@ enum Value {
 impl std::fmt::Display for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Value::Number(num) => f.write_str(&format!("{num:0.03}")),
+            Value::Number(num) => f.write_str(&format!("{num:0.02}")),
             Value::String(string) => f.write_str(string),
         }
     }
