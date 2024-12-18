@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fs::read_to_string;
-use std::io;
 use std::str::FromStr;
+use std::{cell, io};
 
 fn main() -> io::Result<()> {
     let extension = "csv";
@@ -20,9 +20,9 @@ fn main() -> io::Result<()> {
         .zip(separators.into_iter())
     {
         let (mut csv, size) = parse_csv(&contents, separator);
-        for _i in 0..1 {
+        for _i in 0..10 {
             // TODO: split off the one value without csv copy
-            let csv_copy: HashMap<Pos, Status<Cell<'_>>> = csv.clone();
+            let csv_copy: HashMap<Pos, Status> = csv.clone();
             for (pos, status) in csv
                 .iter_mut()
                 .into_iter()
@@ -40,7 +40,7 @@ fn main() -> io::Result<()> {
     Ok(())
 }
 
-fn display_table(table: HashMap<Pos, Status<Cell>>, size: Pos) {
+fn display_table(table: HashMap<Pos, Status>, size: Pos) {
     let mut rows = Vec::new();
     for y in 0..size.y {
         let mut comments = Vec::new();
@@ -105,7 +105,7 @@ fn display_table(table: HashMap<Pos, Status<Cell>>, size: Pos) {
     }
 }
 
-fn parse_csv(contents: &str, separator: char) -> (HashMap<Pos, Status<Cell>>, Pos) {
+fn parse_csv(contents: &str, separator: char) -> (HashMap<Pos, Status>, Pos) {
     let lines = contents.lines().enumerate();
     let mut cells = HashMap::new();
     let (mut max_x, mut max_y) = (0, 0);
@@ -122,60 +122,112 @@ fn parse_csv(contents: &str, separator: char) -> (HashMap<Pos, Status<Cell>>, Po
     }
     (cells, Pos::new(max_x + 1, max_y + 1))
 }
-
-fn resolve_cell(context: &HashMap<Pos, Status<Cell>>, pending_cell: &mut Status<Cell>) {
+//fn resolve_cell(context: &HashMap<Pos, Status<Cell>>, pending_cell: &mut Status<Cell>)
+fn resolve_cell<'context, 'pending>(
+    context: &HashMap<Pos, Status<'context>>,
+    pending_cell: &mut Status<'pending>,
+) where
+    'context: 'pending,
+{
     let mut updated_cell = Status::Error;
     if let Status::Pending(cell) = pending_cell {
-        if let Value::String(content) = &cell.value.clone().unwrap() {
-            if content.starts_with('[') {
-                if let Some(index) = content.find(']') {
-                    let pos = Pos::try_parse(&content[0..=index]);
+        match &cell.value.clone().unwrap() {
+            Value::String(content) => {
+                if content.starts_with('[') {
+                    if let Some(index) = content.find(']') {
+                        let pos = Pos::try_parse(&content[0..=index]);
 
-                    match pos {
-                        // There might be more stuff after position
-                        Ok(pos) => {
-                            updated_cell = Status::Finished(Cell {
-                                original: cell.original,
-                                value: Some(Value::Pos(pos)),
-                                comment: cell.comment,
-                            })
+                        match pos {
+                            // There might be more stuff after position
+                            Ok(pos) => {
+                                updated_cell = Status::Pending(Cell {
+                                    original: cell.original,
+                                    value: Some(Value::Pos(pos)),
+                                    comment: cell.comment,
+                                })
+                            }
+                            Err(_err) => println!("Error parsing position from {content}!"),
                         }
-                        Err(_err) => println!("Error parsing position from {content}!"),
                     }
-                }
-            } else if content.starts_with("Span(") {
-                if let Some(index) = content.find(')') {
-                    let span = try_parse_span(&content[0..=index]);
+                } else if content.starts_with("Span(") {
+                    if let Some(index) = content.find(')') {
+                        let span = try_parse_span(&content[0..=index]);
 
-                    match span {
-                        // There might be more stuff after position
-                        Ok(span) => {
-                            updated_cell = Status::Finished(Cell {
-                                original: cell.original,
-                                value: Some(span),
-                                comment: cell.comment,
-                            })
+                        match span {
+                            // There might be more stuff after position
+                            Ok(span) => {
+                                updated_cell = Status::Pending(Cell {
+                                    original: cell.original,
+                                    value: Some(span),
+                                    comment: cell.comment,
+                                })
+                            }
+                            Err(_err) => println!("Error parsing Span from {content}!"),
                         }
-                        Err(_err) => println!("Error parsing Span from {content}!"),
                     }
-                }
-            } else if content.starts_with("Sum(") {
-                if let Some(index) = content.find(')') {
-                    let span = try_parse_span(&content[4..=index]);
-                    match span {
-                        // There might be more stuff after position
-                        Ok(span) => {
-                            let sum = Value::Sum(Box::from(span));
-                            updated_cell = Status::Finished(Cell {
-                                original: cell.original,
-                                value: Some(sum),
-                                comment: cell.comment,
-                            })
+                } else if content.starts_with("Sum(") {
+                    if let Some(index) = content.find(')') {
+                        let span = try_parse_span(&content[4..=index]);
+                        match span {
+                            // There might be more stuff after position
+                            Ok(span) => {
+                                let sum = Value::Sum(Box::from(span));
+                                updated_cell = Status::Pending(Cell {
+                                    original: cell.original,
+                                    value: Some(sum),
+                                    comment: cell.comment,
+                                })
+                            }
+                            Err(_err) => println!("Error parsing Sum from {content}!"),
                         }
-                        Err(_err) => println!("Error parsing Sum from {content}!"),
                     }
                 }
             }
+            Value::Pos(pos) => match context.get(pos) {
+                Some(cell) => {
+                    updated_cell = cell.clone();
+                }
+                None => (), // Status::Error
+            },
+            Value::Sum(span) => {
+                // get the list of positions
+                let span = match **span {
+                    Value::Span(span) => span, // Extract the inner data if it's Value::Span
+                    _ => panic!("Expected Value::Span, got something else!"),
+                };
+                let cell_positions = list_from_span(span);
+                let mut ready = true;
+                let values: Vec<Value> = cell_positions
+                    .into_iter()
+                    .filter_map(|pos| match context.get(&pos) {
+                        Some(cell) => match cell {
+                            Status::Error => None,
+                            Status::Empty => None,
+                            Status::Pending(cell) => {
+                                ready = false;
+                                None
+                            }
+                            Status::Finished(cell) => cell.value.clone(),
+                        },
+                        None => None,
+                    })
+                    .collect();
+                if ready {
+                    let mut sum = 0.0;
+                    for value in values {
+                        match value {
+                            Value::Number(num) => sum += num,
+                            cell => println!("Error, tried resolving Sum, thought it was ready, found non-number cell {cell}")
+                        }
+                    }
+                    updated_cell = Status::Finished(Cell {
+                        original: cell.original,
+                        value: Some(Value::Number(sum)),
+                        comment: cell.comment,
+                    })
+                }
+            }
+            _ => (),
         }
     }
     if !matches!(updated_cell, Status::Error) {
@@ -183,7 +235,19 @@ fn resolve_cell(context: &HashMap<Pos, Status<Cell>>, pending_cell: &mut Status<
     }
 }
 
-fn parse_cell(cell_contents: &str) -> Status<Cell> {
+fn list_from_span(span: (Pos, Pos)) -> Vec<Pos> {
+    let (from, to) = span;
+    let mut result = Vec::new();
+    for y in from.y..=to.y {
+        for x in from.x..=to.x {
+            let pos = Pos::new(x as usize, y as usize);
+            result.push(pos)
+        }
+    }
+    result
+}
+
+fn parse_cell(cell_contents: &str) -> Status {
     let cell = cell_contents.trim();
     if cell.is_empty() {
         return Status::Empty;
@@ -274,12 +338,12 @@ impl std::fmt::Display for Pos {
 }
 
 #[derive(Debug, Default, Clone)]
-enum Status<T: Default> {
+enum Status<'a> {
     #[default]
     Error,
     Empty,
-    Pending(T),
-    Finished(T),
+    Pending(Cell<'a>),
+    Finished(Cell<'a>),
 }
 
 #[derive(Debug, Default, Clone)]
