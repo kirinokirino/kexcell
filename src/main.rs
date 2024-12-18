@@ -13,16 +13,28 @@ fn main() -> io::Result<()> {
         .map(|file| format!("{folder}/{file}.{extension}"))
         .collect();
 
-    let separators = vec![',', ',', ',', ',', '\t'];
+    let separators = vec![',', ',', ',', '\t', '\t'];
     for (contents, separator) in paths
         .into_iter()
         .filter_map(|path| read_to_string(path).ok())
         .zip(separators.into_iter())
     {
-        let (csv, size) = parse_csv(&contents, separator);
+        let (mut csv, size) = parse_csv(&contents, separator);
+        for _i in 0..1 {
+            // TODO: split off the one value without csv copy
+            let csv_copy: HashMap<Pos, Status<Cell<'_>>> = csv.clone();
+            for (pos, status) in csv
+                .iter_mut()
+                .into_iter()
+                .filter(|(_k, v)| matches![v, Status::Pending(_)])
+            {
+                resolve_cell(&csv_copy, status);
+            }
+        }
         display_table(csv, size);
 
         println!("{}", "-".repeat(20));
+        eprintln!("{}", "-".repeat(20));
     }
 
     Ok(())
@@ -111,6 +123,66 @@ fn parse_csv(contents: &str, separator: char) -> (HashMap<Pos, Status<Cell>>, Po
     (cells, Pos::new(max_x + 1, max_y + 1))
 }
 
+fn resolve_cell(context: &HashMap<Pos, Status<Cell>>, pending_cell: &mut Status<Cell>) {
+    let mut updated_cell = Status::Error;
+    if let Status::Pending(cell) = pending_cell {
+        if let Value::String(content) = &cell.value.clone().unwrap() {
+            if content.starts_with('[') {
+                if let Some(index) = content.find(']') {
+                    let pos = Pos::try_parse(&content[0..=index]);
+
+                    match pos {
+                        // There might be more stuff after position
+                        Ok(pos) => {
+                            updated_cell = Status::Finished(Cell {
+                                original: cell.original,
+                                value: Some(Value::Pos(pos)),
+                                comment: cell.comment,
+                            })
+                        }
+                        Err(_err) => println!("Error parsing position from {content}!"),
+                    }
+                }
+            } else if content.starts_with("Span(") {
+                if let Some(index) = content.find(')') {
+                    let span = try_parse_span(&content[0..=index]);
+
+                    match span {
+                        // There might be more stuff after position
+                        Ok(span) => {
+                            updated_cell = Status::Finished(Cell {
+                                original: cell.original,
+                                value: Some(span),
+                                comment: cell.comment,
+                            })
+                        }
+                        Err(_err) => println!("Error parsing Span from {content}!"),
+                    }
+                }
+            } else if content.starts_with("Sum(") {
+                if let Some(index) = content.find(')') {
+                    let span = try_parse_span(&content[4..=index]);
+                    match span {
+                        // There might be more stuff after position
+                        Ok(span) => {
+                            let sum = Value::Sum(Box::from(span));
+                            updated_cell = Status::Finished(Cell {
+                                original: cell.original,
+                                value: Some(sum),
+                                comment: cell.comment,
+                            })
+                        }
+                        Err(_err) => println!("Error parsing Sum from {content}!"),
+                    }
+                }
+            }
+        }
+    }
+    if !matches!(updated_cell, Status::Error) {
+        let _ = std::mem::replace(pending_cell, updated_cell);
+    }
+}
+
 fn parse_cell(cell_contents: &str) -> Status<Cell> {
     let cell = cell_contents.trim();
     if cell.is_empty() {
@@ -126,10 +198,10 @@ fn parse_cell(cell_contents: &str) -> Status<Cell> {
     // Attempt to evaluate the content
     let value: Option<Value> = if content.is_empty() {
         None
-    } else if let Ok(num) = f64::from_str(content) {
-        Some(Value::Number(num))
     } else if let Ok(result) = eval_expression(content) {
         Some(result)
+    } else if !content.contains(['[']) {
+        Some(Value::String(content.to_string()))
     } else {
         return Status::Pending(Cell {
             original: cell_contents,
@@ -167,9 +239,41 @@ impl Pos {
             y: y.try_into().unwrap(),
         }
     }
+
+    /// "[0,0]" => Pos(0,0)
+    fn try_parse(from: &str) -> Result<Self, std::num::ParseIntError> {
+        let trimmed_brackets = &from[1..from.len() - 1];
+        let (y, x) = trimmed_brackets.split_once(',').unwrap();
+
+        Ok(Self {
+            x: i32::from_str(x.trim())?,
+            y: i32::from_str(y.trim())?,
+        })
+    }
+}
+/// "Span([0,0], [1,2])" => Span(Pos(0,0), Pos(1,2))
+fn try_parse_span(from: &str) -> Result<Value, Box<dyn std::error::Error>> {
+    let trimmed_brackets = &from[5..from.len() - 1];
+
+    if let Some(index) = trimmed_brackets.find(']') {
+        let (first, second) = trimmed_brackets.split_at(index + 1);
+        // first: "[0,0]", second:", [1,2]"
+
+        return Ok(Value::Span((
+            Pos::try_parse(first)?,
+            Pos::try_parse(&second[2..])?,
+        )));
+    }
+    Err("Tried to parse Span, no ']' found".into())
 }
 
-#[derive(Debug, Default)]
+impl std::fmt::Display for Pos {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&format!("Pos[{},{}]", self.x, self.y))
+    }
+}
+
+#[derive(Debug, Default, Clone)]
 enum Status<T: Default> {
     #[default]
     Error,
@@ -178,17 +282,20 @@ enum Status<T: Default> {
     Finished(T),
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 struct Cell<'a> {
     original: &'a str, // Original cell content
     value: Option<Value>,
     comment: Option<&'a str>, // Comment, if present
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum Value {
     Number(f64),
     String(String),
+    Pos(Pos),
+    Span((Pos, Pos)),
+    Sum(Box<Value>),
 }
 
 impl std::fmt::Display for Value {
@@ -196,6 +303,9 @@ impl std::fmt::Display for Value {
         match self {
             Value::Number(num) => f.write_str(&format!("{num:0.02}")),
             Value::String(string) => f.write_str(string),
+            Value::Pos(pos) => f.write_str(&format!("{pos}")),
+            Value::Span((from, to)) => f.write_str(&format!("Span({from}, {to})")),
+            Value::Sum(span) => f.write_str(&format!("Sum({})", span.as_ref())),
         }
     }
 }

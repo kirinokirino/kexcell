@@ -1,1 +1,5 @@
-indexing cells
+xxxxxxxxxxx	xxx	xxxxx
+[0,1] #-> 3	3	[0,0]
+[1,1] #-> 4	4	[0,3]
+Span([0,0], [3, 3]) x   x
+Sum(Span([0,0], [3, 3])) x   x
